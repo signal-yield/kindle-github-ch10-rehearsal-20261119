@@ -19,7 +19,7 @@ def main():
                 display = "算出不可（面積空欄）"
                 unavailable += 1
             print(f'{row["id"]},{display}')
-    print(f"computed={computed} unavailable={unavailable}")
+    print(f"算出{computed}件、算出不可{unavailable}件")
 
 
 if __name__ == "__main__":
