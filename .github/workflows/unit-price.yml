@@ -1,0 +1,24 @@
+name: Calculate unit prices
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  unit-prices:
+    name: Calculate unit prices
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run the exercise and publish its output
+        if: ${{ hashFiles('unit_price.py') != '' }}
+        shell: bash
+        run: |
+          {
+            printf '## ㎡単価の実行結果\n\n'
+            printf '\x60\x60\x60text\n'
+            python3 --version
+            python3 unit_price.py
+            printf '\x60\x60\x60\n'
+          } | tee "$GITHUB_STEP_SUMMARY"
