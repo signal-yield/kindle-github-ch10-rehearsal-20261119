@@ -1,0 +1,110 @@
+name: Calculate unit prices
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: unit-prices-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  unit-prices:
+    name: Calculate unit prices
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      comment_payload: ${{ steps.summary.outputs.comment_payload }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Run the exercise and publish its output
+        id: calculate
+        if: ${{ hashFiles('unit_price.py') != '' }}
+        shell: bash
+        run: |
+          python3 --version
+          python3 unit_price.py 2>&1 | tee "$RUNNER_TEMP/ch09-unit-prices.txt"
+      - name: Write the Job Summary
+        id: summary
+        if: ${{ !cancelled() && steps.calculate.outcome != 'skipped' && steps.calculate.outcome != '' }}
+        uses: actions/github-script@v8
+        env:
+          CALCULATION_OUTCOME: ${{ steps.calculate.outcome }}
+        with:
+          script: |
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const marker = '<!-- ch09-unit-price-results -->';
+            const outputPath = path.join(process.env.RUNNER_TEMP, 'ch09-unit-prices.txt');
+            const output = fs.existsSync(outputPath)
+              ? fs.readFileSync(outputPath, 'utf8').trimEnd()
+              : '実行出力を取得できませんでした。ログを確認してください。';
+            const counts = output.match(/^computed=(\d+) unavailable=(\d+)\s*$/m);
+            const fence = '`'.repeat(Math.max(3, ...Array.from(output.matchAll(/`+/g), match => match[0].length + 1)));
+            const pr = context.payload.pull_request;
+            const repositoryUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}`;
+            const runUrl = `${repositoryUrl}/actions/runs/${context.runId}`;
+            const succeeded = process.env.CALCULATION_OUTCOME === 'success';
+            const body = [
+              marker,
+              '## ㎡単価の実行結果',
+              '',
+              `対象コミット: [${pr.head.sha.slice(0, 7)}](${repositoryUrl}/commit/${pr.head.sha})`,
+              `[実行記録・Job Summary](${runUrl})`,
+              '',
+              succeeded ? '実行状態: 成功' : '実行状態: 失敗。途中の出力を計算完了と扱わず、ログを確認してください。',
+              succeeded && counts
+                ? `算出件数: **${counts[1]}件** / 算出不可件数: **${counts[2]}件**`
+                : '件数は実行出力とログで確認してください。',
+              '',
+              '単位: 万円/㎡',
+              '',
+              `${fence}text`,
+              output,
+              fence,
+              '',
+              '差分・A01の手計算・A08の四捨五入・A10の空欄・件数を確認してからマージします。',
+            ].join('\n');
+            await core.summary.addRaw(body).write();
+            core.setOutput('comment_payload', Buffer.from(body, 'utf8').toString('base64'));
+
+  post-result:
+    name: Post results to the pull request
+    needs: unit-prices
+    if: ${{ !cancelled() && needs.unit-prices.outputs.comment_payload != '' && github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Create or update the result comment
+        uses: actions/github-script@v8
+        env:
+          RESULT: ${{ needs.unit-prices.outputs.comment_payload }}
+        with:
+          script: |
+            const marker = '<!-- ch09-unit-price-results -->';
+            const body = Buffer.from(process.env.RESULT, 'base64').toString('utf8');
+            const pr = context.payload.pull_request;
+            const current = await github.rest.pulls.get({ ...context.repo, pull_number: pr.number });
+            if (current.data.head.sha !== pr.head.sha) {
+              core.notice('新しいコミットがあるため、古い実行結果のPRコメント更新を省略します。');
+              return;
+            }
+            try {
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                ...context.repo, issue_number: pr.number, per_page: 100,
+              });
+              const previous = comments.find(comment =>
+                comment.user.login === 'github-actions[bot]' && comment.body?.startsWith(marker));
+              if (previous) {
+                await github.rest.issues.updateComment({ ...context.repo, comment_id: previous.id, body });
+              } else {
+                await github.rest.issues.createComment({ ...context.repo, issue_number: pr.number, body });
+              }
+            } catch (error) {
+              if (error.status !== 403) throw error;
+              core.warning('PRコメントの権限がありません。Job Summaryまたは実行ログで結果を確認してください。');
+            }
